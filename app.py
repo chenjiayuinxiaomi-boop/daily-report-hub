@@ -115,7 +115,7 @@ with input_tab:
             markdown = build_markdown(payload)
             st.session_state["last_payload"] = payload
             st.session_state["last_markdown"] = markdown
-            st.success("日报已生成，请到“生成预览”页查看或保存。")
+            st.success("日报已生成，请到【生成预览】页查看或保存。")
 
 with preview_tab:
     st.subheader("生成概览")
@@ -123,7 +123,7 @@ with preview_tab:
     payload = st.session_state.get("last_payload")
 
     if not markdown or not payload:
-        st.info("先在“填写日报”页生成内容。")
+        st.info("先在【填写日报】页生成内容。")
     else:
         analysis = payload["analysis"]
         original_view = build_original_view(payload)
@@ -268,7 +268,7 @@ with weekly_tab:
     st.subheader("周报汇总")
     all_reports = load_reports()
     if not all_reports:
-        st.info("还没有保存过日报，先在"填写日报"页生成并保存。")
+        st.info("还没有保存过日报，先在【填写日报】页生成并保存。")
     else:
         df_all = pd.DataFrame(all_reports)
         all_authors = ["全部"] + sorted(df_all["author"].dropna().unique().tolist())
