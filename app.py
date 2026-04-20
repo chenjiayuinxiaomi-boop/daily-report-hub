@@ -5,9 +5,16 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from report_service import build_markdown, build_report_payload
+from report_service import (
+    build_analysis,
+    build_leader_report,
+    build_markdown,
+    build_report_payload,
+)
 from storage import append_report, load_reports
 from weekly_service import build_weekly_markdown, build_weekly_summary
+from llm_service import generate_leader_summary_llm, rewrite_with_llm
+from notifier import send_feishu, send_weixin
 
 
 def format_items_for_display(items: list[str]) -> str:
@@ -39,6 +46,14 @@ def build_original_view(payload: dict[str, object]) -> str:
 {notes}
 """.strip()
 
+
+def _get_secret(section: str, key: str, default: str = "") -> str:
+    try:
+        return str(st.secrets[section][key])
+    except Exception:
+        return default
+
+
 st.set_page_config(
     page_title="Daily Report Hub",
     page_icon="📝",
@@ -62,14 +77,47 @@ with overview_col:
 with stats_col:
     st.metric("累计日报", len(reports))
 
-input_tab, preview_tab, history_tab, weekly_tab = st.tabs(["填写日报", "生成预览", "历史记录", "周报汇总"])
+# ── 侧边栏配置 ──────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("个人设置")
+    saved_author = st.session_state.get("author_name", "")
+    sidebar_author = st.text_input("你的名字（自动填入日报）", value=saved_author, key="sidebar_author")
+    if sidebar_author:
+        st.session_state["author_name"] = sidebar_author
 
+    st.divider()
+    st.subheader("AI 改写")
+    _key_from_secret = _get_secret("llm", "api_key")
+    if _key_from_secret:
+        llm_api_key: str = _key_from_secret
+        llm_base_url: str = _get_secret("llm", "base_url", "https://api.openai.com/v1")
+        llm_model: str = _get_secret("llm", "model", "gpt-4o-mini")
+        st.success("AI 改写已就绪（后台配置）")
+    else:
+        llm_api_key = st.text_input("API Key", type="password", key="llm_api_key")
+        llm_base_url = st.text_input("Base URL", value="https://api.openai.com/v1", key="llm_base_url")
+        llm_model = st.text_input("Model", value="gpt-4o-mini", key="llm_model")
+        if llm_api_key:
+            st.success("AI 改写已就绪")
+        else:
+            st.caption("填入 API Key 后可启用 AI 改写")
+
+    st.divider()
+    st.subheader("发送通知")
+    _wx_secret = _get_secret("weixin", "webhook_url")
+    _fs_secret = _get_secret("feishu", "webhook_url")
+    weixin_webhook: str = _wx_secret or st.text_input("企业微信 Webhook URL", key="weixin_webhook")
+    feishu_webhook: str = _fs_secret or st.text_input("飞书 Webhook URL", key="feishu_webhook")
+    if _wx_secret or _fs_secret:
+        st.success("通知渠道已配置（后台配置）")
+
+input_tab, preview_tab, history_tab, weekly_tab = st.tabs(["填写日报", "生成预览", "历史记录", "周报汇总"])
 with input_tab:
     with st.form("daily_report_form"):
         left_col, right_col = st.columns(2)
         with left_col:
             report_date = st.date_input("日期", value=date.today())
-            author = st.text_input("姓名", placeholder="例如：Hope")
+            author = st.text_input("姓名", value=st.session_state.get("author_name", ""), placeholder="例如：Hope")
             completed_raw = st.text_area(
                 "今日完成",
                 placeholder="每行一项，例如：\n完成日报工具首页原型\n联调本地数据存储",
@@ -97,6 +145,12 @@ with input_tab:
                 height=180,
             )
 
+        use_ai = st.checkbox(
+            "使用 AI 改写",
+            value=False,
+            help="需在侧边栏配置 API Key",
+            disabled=not bool(llm_api_key),
+        )
         submitted = st.form_submit_button("生成日报", use_container_width=True)
 
     if submitted:
@@ -112,6 +166,29 @@ with input_tab:
                 tomorrow_raw=tomorrow_raw,
                 notes=notes,
             )
+            if use_ai and llm_api_key:
+                with st.spinner("AI 改写中，请稍候..."):
+                    for category, field in [
+                        ("今日完成", "completed"),
+                        ("进行中", "in_progress"),
+                        ("阻塞项", "blockers"),
+                        ("明日计划", "tomorrow"),
+                    ]:
+                        rewritten, err = rewrite_with_llm(
+                            payload[field], category, llm_api_key, llm_base_url, llm_model
+                        )
+                        if err:
+                            st.warning(f"{category}: {err}")
+                        payload[field] = rewritten
+                    payload["analysis"] = build_analysis(payload)
+                    payload["leader_report"] = build_leader_report(payload)
+                    ai_summary, ai_err = generate_leader_summary_llm(
+                        payload, llm_api_key, llm_base_url, llm_model
+                    )
+                    if ai_summary:
+                        payload["ai_summary"] = ai_summary
+                    if ai_err:
+                        st.warning(ai_err)
             markdown = build_markdown(payload)
             st.session_state["last_payload"] = payload
             st.session_state["last_markdown"] = markdown
@@ -195,7 +272,13 @@ with preview_tab:
         with st.expander("查看完整优化后 Markdown", expanded=False):
             st.code(markdown, language="markdown")
 
-        action_col, download_col = st.columns(2)
+        # AI 增强摘要（如已启用 AI 改写）
+        ai_summary_text = payload.get("ai_summary", "")
+        if ai_summary_text:
+            st.markdown("### AI 生成领导摘要")
+            st.info(ai_summary_text)
+
+        action_col, download_col, wx_col, fs_col = st.columns(4)
         with action_col:
             if st.button("保存到本地历史", use_container_width=True):
                 append_report({**payload, "markdown": markdown})
@@ -210,6 +293,22 @@ with preview_tab:
                 mime="text/markdown",
                 use_container_width=True,
             )
+        with wx_col:
+            if weixin_webhook:
+                if st.button("发送到企业微信", use_container_width=True):
+                    ok, msg = send_weixin(weixin_webhook, markdown)
+                    st.success(msg) if ok else st.error(msg)
+            else:
+                st.button("发送到企业微信", disabled=True, use_container_width=True,
+                          help="请在侧边栏配置 Webhook")
+        with fs_col:
+            if feishu_webhook:
+                if st.button("发送到飞书", use_container_width=True):
+                    ok, msg = send_feishu(feishu_webhook, markdown)
+                    st.success(msg) if ok else st.error(msg)
+            else:
+                st.button("发送到飞书", disabled=True, use_container_width=True,
+                          help="请在侧边栏配置 Webhook")
 
 with history_tab:
     st.subheader("历史记录")
