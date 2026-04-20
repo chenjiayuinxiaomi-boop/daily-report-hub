@@ -282,7 +282,7 @@ def build_leader_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-
+def build_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "summary": build_summary_sentence(payload),
         "risk_level": build_risk_level(payload),
