@@ -760,6 +760,10 @@ def _process_rule(
         return True
 
     if not last_processed_week:
+        if apply:
+            _mark_processed(state, rule, latest)
+            print(f"[{rule.key}] state missing; initialized at {latest.title}")
+            return True
         print(f"[{rule.key}] state missing; run with --init-state once before applying")
         return False
 
