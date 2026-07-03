@@ -91,6 +91,14 @@ RULES = [
         min_cells=6,
     ),
     Rule(
+        key="mgu_padi_victoria",
+        parent_id="7665084818",
+        title_suffix="MGU",
+        feature="Padi",
+        second_cell_values=("Chu Vivian/victoria zhao",),
+        min_cells=2,
+    ),
+    Rule(
         key="idcevo_cn_launcher",
         parent_id="7665067082",
         title_suffix="IDCEvo",
