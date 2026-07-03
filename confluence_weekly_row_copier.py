@@ -83,6 +83,14 @@ RULES = [
         ),
     ),
     Rule(
+        key="idc_padi_evan",
+        parent_id="7669198289",
+        title_suffix="IDC",
+        feature="PADI",
+        fos_names=("Evan Zheng", "BATW"),
+        min_cells=2,
+    ),
+    Rule(
         key="mgu_tencent_mpp",
         parent_id="7665084818",
         title_suffix="MGU",
