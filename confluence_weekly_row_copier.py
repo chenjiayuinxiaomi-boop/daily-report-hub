@@ -103,7 +103,7 @@ RULES = [
         parent_id="7665084818",
         title_suffix="MGU",
         feature="Padi",
-        second_cell_values=("Chu Vivian/victoria zhao",),
+        fos_names=("Chu Vivian", "victoria zhao"),
         min_cells=2,
     ),
     Rule(
