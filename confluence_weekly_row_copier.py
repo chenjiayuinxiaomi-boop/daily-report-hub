@@ -87,8 +87,7 @@ RULES = [
         parent_id="7669198289",
         title_suffix="IDC",
         feature="PADI",
-        fos_names=("Evan Zheng", "BATW"),
-        min_cells=2,
+        min_cells=6,
     ),
     Rule(
         key="mgu_tencent_mpp",
@@ -879,19 +878,28 @@ def main() -> int:
     state = _load_state(args.state_file)
     session = _session(args.base_url)
     changed_state = False
+    errors: list[tuple[str, str]] = []
 
     print("mode=" + ("apply" if args.apply else "dry-run"))
     for rule in selected_rules:
-        changed_state = (
-            _process_rule(session, rule, state, apply=args.apply, init_state=args.init_state)
-            or changed_state
-        )
+        try:
+            changed_state = (
+                _process_rule(session, rule, state, apply=args.apply, init_state=args.init_state)
+                or changed_state
+            )
+        except Exception as exc:
+            errors.append((rule.key, str(exc)))
+            print(f"[{rule.key}] ERROR: {exc}")
 
     if args.init_state or (args.apply and changed_state):
         _save_state(args.state_file, state)
         print(f"state_saved={args.state_file}")
     elif not args.apply:
         print("dry_run_no_remote_changes")
+
+    if errors:
+        print("run_errors=" + str(len(errors)))
+        return 1
     return 0
 
 
