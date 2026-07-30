@@ -5,7 +5,12 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
+import smtplib
+import socket
+import subprocess
 from dataclasses import dataclass
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +33,7 @@ except Exception:
 
 DEFAULT_BASE_URL = "https://atc.bmwgroup.net/confluence"
 DEFAULT_STATE_FILE = Path("data/confluence_weekly_row_copier_state.json")
+DEFAULT_ALERT_TO = "Hope.Chen@batw.bmwgroup.com"
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,7 @@ RULES = [
             ("11/26(pu info)", "11/26(pu info)"),
             ("11/26(pu info)", "which version will be used for this test?"),
             ("which version will be used for this test?", "release circle target date (required field)"),
+            ("release circle target date (required field)", "03/27(pu info)"),
         ),
     ),
     Rule(
@@ -94,7 +101,6 @@ RULES = [
         parent_id="7665084818",
         title_suffix="MGU",
         feature="Video Streaming in Tencent MPP",
-        fos_names=("Zain Qian", "Zhu Zola", "Liu Arun"),
         min_cells=6,
     ),
     Rule(
@@ -747,6 +753,73 @@ def _mark_processed(state: dict[str, Any], rule: Rule, page: WeeklyPage) -> None
     }
 
 
+def _send_error_alert(errors: list[tuple[str, str]], *, apply: bool) -> None:
+    if not errors:
+        return
+
+    alert_to = os.environ.get("WEEKLY_COPIER_ALERT_TO", DEFAULT_ALERT_TO).strip()
+    if not alert_to:
+        return
+
+    smtp_host = os.environ.get("WEEKLY_COPIER_SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("WEEKLY_COPIER_SMTP_PORT", "25"))
+    smtp_user = os.environ.get("WEEKLY_COPIER_SMTP_USER", "").strip()
+    smtp_pass = os.environ.get("WEEKLY_COPIER_SMTP_PASS", "")
+    smtp_starttls = os.environ.get("WEEKLY_COPIER_SMTP_STARTTLS", "1").strip().lower() not in {"0", "false", "no"}
+    alert_from = os.environ.get("WEEKLY_COPIER_ALERT_FROM", f"weekly-copier@{socket.gethostname()}").strip()
+
+    mode = "apply" if apply else "dry-run"
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
+    lines = [
+        f"Confluence weekly copier encountered {len(errors)} rule error(s).",
+        f"Time: {now}",
+        f"Host: {socket.gethostname()}",
+        f"Mode: {mode}",
+        "",
+        "Errors:",
+    ]
+    for key, message in errors:
+        lines.append(f"- [{key}] {message}")
+    body = "\n".join(lines)
+    subject = f"[Weekly Copier] {len(errors)} error(s) in {mode}"
+
+    if smtp_host:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = alert_from
+        msg["To"] = alert_to
+        msg.set_content(body)
+        try:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+                if smtp_starttls:
+                    server.starttls()
+                if smtp_user:
+                    server.login(smtp_user, smtp_pass)
+                server.send_message(msg)
+            print(f"[alert] email sent to {alert_to}")
+            return
+        except Exception as exc:
+            print(f"[alert] smtp send failed: {exc}")
+
+    sendmail_path = shutil.which("sendmail")
+    if sendmail_path:
+        raw = (
+            f"From: {alert_from}\n"
+            f"To: {alert_to}\n"
+            f"Subject: {subject}\n"
+            "Content-Type: text/plain; charset=utf-8\n\n"
+            f"{body}\n"
+        )
+        try:
+            subprocess.run([sendmail_path, "-t", "-oi"], input=raw.encode("utf-8"), check=True)
+            print(f"[alert] sendmail sent to {alert_to}")
+            return
+        except Exception as exc:
+            print(f"[alert] sendmail failed: {exc}")
+
+    print("[alert] skipped: no smtp config and sendmail unavailable")
+
+
 def _process_rule(
     session: requests.Session,
     rule: Rule,
@@ -898,6 +971,7 @@ def main() -> int:
         print("dry_run_no_remote_changes")
 
     if errors:
+        _send_error_alert(errors, apply=args.apply)
         print("run_errors=" + str(len(errors)))
         return 1
     return 0
