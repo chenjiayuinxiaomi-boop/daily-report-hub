@@ -753,6 +753,34 @@ def _mark_processed(state: dict[str, Any], rule: Rule, page: WeeklyPage) -> None
     }
 
 
+def _annotate_error(message: str) -> tuple[str, str]:
+    text = (message or "").lower()
+    if "http 403" in text and "/rest/api/content/" in text:
+        return (
+            "Confluence rejected page update due to insufficient edit permission.",
+            "Check page restriction and token owner permission, or skip this rule for protected pages.",
+        )
+    if "expected exactly one matching row, found 0" in text:
+        return (
+            "The row selector no longer matches current table content.",
+            "Review weekly page table headers/row text and adjust rule matcher.",
+        )
+    if "row count mismatch" in text:
+        return (
+            "Source and target page row structure diverged.",
+            "Verify template consistency and update copy strategy for occurrence mapping.",
+        )
+    if "failed to resolve" in text or "nameresolutionerror" in text:
+        return (
+            "DNS/network resolution failed when calling Confluence.",
+            "Check runner network, DNS, proxy, and internal domain reachability.",
+        )
+    return (
+        "Unhandled runtime error.",
+        "Check raw message and recent table/template changes, then update rule logic if needed.",
+    )
+
+
 def _send_error_alert(errors: list[tuple[str, str]], *, apply: bool) -> None:
     if not errors:
         return
@@ -780,6 +808,9 @@ def _send_error_alert(errors: list[tuple[str, str]], *, apply: bool) -> None:
     ]
     for key, message in errors:
         lines.append(f"- [{key}] {message}")
+        cause, action = _annotate_error(message)
+        lines.append(f"  Cause: {cause}")
+        lines.append(f"  Suggested action: {action}")
     body = "\n".join(lines)
     subject = f"[Weekly Copier] {len(errors)} error(s) in {mode}"
 
