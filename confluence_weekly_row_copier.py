@@ -614,6 +614,78 @@ def _find_all_rows_by_second_cell(storage_html: str, rule: Rule) -> dict[str, li
     return by_label
 
 
+def _table_signature(table_rows: list[RowRef]) -> str:
+    parts: list[str] = []
+    for row in table_rows[:2]:
+        row_parts = [_normalize_text(cell.text).lower() for cell in row.cells[:3]]
+        row_text = " | ".join([text for text in row_parts if text])
+        if row_text:
+            parts.append(row_text)
+    signature = " || ".join(parts)
+    signature = re.sub(r"cw\d+", "cw", signature, flags=re.IGNORECASE)
+    return signature
+
+
+def _align_rows_by_table_and_position(
+    source_html: str,
+    target_html: str,
+    source_rows: dict[str, list[RowRef]],
+    target_rows: dict[str, list[RowRef]],
+) -> tuple[dict[str, list[tuple[RowRef, RowRef]]], list[str]]:
+    source_all_rows = _parse_rows(source_html)
+    target_all_rows = _parse_rows(target_html)
+
+    def _rows_by_table(rows: list[RowRef]) -> dict[int, list[RowRef]]:
+        by_table: dict[int, list[RowRef]] = {}
+        for row in rows:
+            by_table.setdefault(row.table_index, []).append(row)
+        return by_table
+
+    source_table_rows = _rows_by_table(source_all_rows)
+    target_table_rows = _rows_by_table(target_all_rows)
+    source_table_sign = {table: _table_signature(rows) for table, rows in source_table_rows.items()}
+    target_table_sign = {table: _table_signature(rows) for table, rows in target_table_rows.items()}
+
+    aligned: dict[str, list[tuple[RowRef, RowRef]]] = {}
+    warnings: list[str] = []
+
+    for label, s_rows in source_rows.items():
+        t_rows = target_rows[label]
+
+        def _index(rows: list[RowRef], table_sign: dict[int, str]) -> dict[tuple[str, int], RowRef]:
+            table_occurrence: dict[int, int] = {}
+            result: dict[tuple[str, int], RowRef] = {}
+            for row in rows:
+                table_occurrence[row.table_index] = table_occurrence.get(row.table_index, 0) + 1
+                ordinal = table_occurrence[row.table_index]
+                key = (table_sign.get(row.table_index, ""), ordinal)
+                result[key] = row
+            return result
+
+        source_idx = _index(s_rows, source_table_sign)
+        target_idx = _index(t_rows, target_table_sign)
+        pairs: list[tuple[RowRef, RowRef]] = []
+
+        for key, source_row in source_idx.items():
+            target_row = target_idx.get(key)
+            if target_row is not None:
+                pairs.append((source_row, target_row))
+            else:
+                warnings.append(
+                    f"{label}: missing matching target row for table-signature={key[0]!r} occurrence={key[1]}"
+                )
+
+        for key in target_idx.keys():
+            if key not in source_idx:
+                warnings.append(
+                    f"{label}: extra target row not present in source for table-signature={key[0]!r} occurrence={key[1]}"
+                )
+
+        aligned[label] = sorted(pairs, key=lambda p: (p[0].table_index, p[0].row_index))
+
+    return aligned, warnings
+
+
 def _copy_row_cells(
     target_html: str,
     source_row: RowRef,
@@ -685,8 +757,7 @@ def _copy_labeled_rows(
 
 def _copy_labeled_rows_by_occurrence(
     target_html: str,
-    source_rows: dict[str, list[RowRef]],
-    target_rows: dict[str, list[RowRef]],
+    aligned_rows: dict[str, list[tuple[RowRef, RowRef]]],
     *,
     rule: Rule | None = None,
     source_storage_html: str | None = None,
@@ -697,15 +768,13 @@ def _copy_labeled_rows_by_occurrence(
     source_header = None
     target_header = None
     if rule and source_storage_html and target_storage_html:
-        sample_source_rows = next(iter(source_rows.values()), [])
-        sample_target_rows = next(iter(target_rows.values()), [])
-        if sample_source_rows and sample_target_rows:
-            source_header = _find_header_row(source_storage_html, sample_source_rows[0].table_index, sample_source_rows[0].row_index)
-            target_header = _find_header_row(target_storage_html, sample_target_rows[0].table_index, sample_target_rows[0].row_index)
+        sample_pairs = next(iter(aligned_rows.values()), [])
+        if sample_pairs:
+            source_header = _find_header_row(source_storage_html, sample_pairs[0][0].table_index, sample_pairs[0][0].row_index)
+            target_header = _find_header_row(target_storage_html, sample_pairs[0][1].table_index, sample_pairs[0][1].row_index)
 
-    for label, rows in source_rows.items():
-        target_list = target_rows[label]
-        for source_row, target_row in zip(rows, target_list):
+    for label, pairs in aligned_rows.items():
+        for source_row, target_row in pairs:
             if source_storage_html and target_storage_html:
                 row_pairs = _column_pairs_by_header(source_storage_html, target_storage_html, source_row, target_row)
             else:
@@ -916,24 +985,23 @@ def _process_rule(
             if rule.copy_all_by_occurrence:
                 all_source_rows = _find_all_rows_by_second_cell(source_html, rule)
                 all_target_rows = _find_all_rows_by_second_cell(target_html, rule)
-                for label in rule.second_cell_values:
-                    s_count = len(all_source_rows[label])
-                    t_count = len(all_target_rows[label])
-                    if s_count != t_count:
-                        print(
-                            f"[{rule.key}] row-count drift for {label}: source={s_count}, target={t_count}; "
-                            "copying shared occurrences only"
-                        )
-                new_html, changed = _copy_labeled_rows_by_occurrence(
+                aligned_rows, align_warnings = _align_rows_by_table_and_position(
+                    source_html,
                     target_html,
                     all_source_rows,
                     all_target_rows,
+                )
+                for warning in align_warnings:
+                    print(f"[{rule.key}] {warning}")
+                new_html, changed = _copy_labeled_rows_by_occurrence(
+                    target_html,
+                    aligned_rows,
                     rule=rule,
                     source_storage_html=source_html,
                     target_storage_html=target_html,
                 )
                 for label in rule.second_cell_values:
-                    for index, (source_row, target_row) in enumerate(zip(all_source_rows[label], all_target_rows[label]), 1):
+                    for index, (source_row, target_row) in enumerate(aligned_rows.get(label, []), 1):
                         print(
                             f"[{rule.key}] {label} #{index}: {source_page_info.title} table {source_row.table_index} row {source_row.row_index} "
                             f"-> {target_page_info.title} table {target_row.table_index} row {target_row.row_index}"
