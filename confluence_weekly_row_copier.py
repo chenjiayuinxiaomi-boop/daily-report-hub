@@ -704,12 +704,8 @@ def _copy_labeled_rows_by_occurrence(
             target_header = _find_header_row(target_storage_html, sample_target_rows[0].table_index, sample_target_rows[0].row_index)
 
     for label, rows in source_rows.items():
-        if len(rows) != len(target_rows[label]):
-            raise RuntimeError(
-                f"Row count mismatch for {label}: source has {len(rows)}, "
-                f"target has {len(target_rows[label])}"
-            )
-        for source_row, target_row in zip(rows, target_rows[label]):
+        target_list = target_rows[label]
+        for source_row, target_row in zip(rows, target_list):
             if source_storage_html and target_storage_html:
                 row_pairs = _column_pairs_by_header(source_storage_html, target_storage_html, source_row, target_row)
             else:
@@ -920,6 +916,14 @@ def _process_rule(
             if rule.copy_all_by_occurrence:
                 all_source_rows = _find_all_rows_by_second_cell(source_html, rule)
                 all_target_rows = _find_all_rows_by_second_cell(target_html, rule)
+                for label in rule.second_cell_values:
+                    s_count = len(all_source_rows[label])
+                    t_count = len(all_target_rows[label])
+                    if s_count != t_count:
+                        print(
+                            f"[{rule.key}] row-count drift for {label}: source={s_count}, target={t_count}; "
+                            "copying shared occurrences only"
+                        )
                 new_html, changed = _copy_labeled_rows_by_occurrence(
                     target_html,
                     all_source_rows,
