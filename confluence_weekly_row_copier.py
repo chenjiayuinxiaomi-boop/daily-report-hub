@@ -48,6 +48,7 @@ class Rule:
     second_cell_values: tuple[str, ...] = ()
     copy_all_by_occurrence: bool = False
     copy_header_contexts: tuple[tuple[str, str], ...] = ()
+    skip_leading_columns: int = 2
 
 
 @dataclass(frozen=True)
@@ -641,6 +642,13 @@ def _copy_row_cells(
         else:
             pairs = _filter_pairs_for_rule(rule, pairs, source_header, target_header)
 
+    if rule and rule.skip_leading_columns > 0:
+        pairs = [
+            (source, target)
+            for source, target in pairs
+            if source.col_start > rule.skip_leading_columns and target.col_start > rule.skip_leading_columns
+        ]
+
     changed = any(source.inner_html != target.inner_html for source, target in pairs)
     if not changed:
         return target_html, False
@@ -710,6 +718,12 @@ def _copy_labeled_rows_by_occurrence(
             if rule:
                 targeted_pairs = _targeted_pairs_for_rule(rule, source_row, target_row, source_header, target_header)
                 row_pairs = targeted_pairs if targeted_pairs else _filter_pairs_for_rule(rule, row_pairs, source_header, target_header)
+                if rule.skip_leading_columns > 0:
+                    row_pairs = [
+                        (source_cell, target_cell)
+                        for source_cell, target_cell in row_pairs
+                        if source_cell.col_start > rule.skip_leading_columns and target_cell.col_start > rule.skip_leading_columns
+                    ]
             for source_cell, target_cell in row_pairs:
                 replacements.append((source_cell, target_cell))
                 changed_any = changed_any or source_cell.inner_html != target_cell.inner_html
