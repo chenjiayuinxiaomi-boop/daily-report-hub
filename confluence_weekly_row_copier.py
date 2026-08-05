@@ -49,6 +49,8 @@ class Rule:
     copy_all_by_occurrence: bool = False
     copy_header_contexts: tuple[tuple[str, str], ...] = ()
     skip_leading_columns: int = 2
+    copy_enabled: bool = True
+    copy_feature_link_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,7 @@ RULES = [
         min_cells=4,
         title_pattern=r"^2026_CW(\d+)_IDCEvo(?:(?:/|\+|\s+)PENT)?$",
         second_cell_values=("Use Co-Driver Entertainment", "Use Rear Seat Entertainment"),
+        copy_enabled=False,
     ),
     Rule(
         key="idcevo_cn_vod",
@@ -130,6 +133,7 @@ RULES = [
         title_pattern=r"^2026_CW(\d+)_IDCEvo(?:(?:/|\+|\s+)PENT)?$",
         second_cell_values=("Video Streaming China",),
         copy_all_by_occurrence=True,
+        copy_feature_link_only=True,
     ),
 ]
 
@@ -355,9 +359,13 @@ def _find_header_row(storage_html: str, table_index: int, before_row_index: int)
     def _score(row: RowRef) -> tuple[int, int, int]:
         texts = [_normalize_text(cell.text).lower() for cell in row.cells]
         non_empty = sum(1 for text in texts if text)
-        first = texts[0] if texts else ""
-        # Prefer rows that look like table headers, otherwise pick the densest row.
-        header_like = 1 if first in {"feature", "function", "module", "feature/function"} else 0
+        joined = " | ".join(texts)
+        # Prefer the actual header row that names the columns, not a dense content row.
+        header_like = 0
+        if any(label in joined for label in ("application module", "case amount", "feature link")):
+            header_like = 3
+        elif any(label in joined for label in ("feature", "function", "module", "feature/function")):
+            header_like = 1
         return (header_like, non_empty, len(row.cells))
 
     return max(rows, key=_score)
@@ -695,6 +703,12 @@ def _copy_row_cells(
     source_storage_html: str | None = None,
     target_storage_html: str | None = None,
 ) -> tuple[str, bool]:
+    source_header = None
+    target_header = None
+    if source_storage_html and target_storage_html:
+        source_header = _find_header_row(source_storage_html, source_row.table_index, source_row.row_index)
+        target_header = _find_header_row(target_storage_html, target_row.table_index, target_row.row_index)
+
     source_count = len(source_row.cells)
     target_count = len(target_row.cells)
     if source_count == target_count:
@@ -706,8 +720,6 @@ def _copy_row_cells(
         pair_count = min(source_count, target_count)
         pairs = list(zip(source_row.cells[:pair_count], target_row.cells[:pair_count]))
     if rule and source_storage_html and target_storage_html:
-        source_header = _find_header_row(source_storage_html, source_row.table_index, source_row.row_index)
-        target_header = _find_header_row(target_storage_html, target_row.table_index, target_row.row_index)
         targeted_pairs = _targeted_pairs_for_rule(rule, source_row, target_row, source_header, target_header)
         if targeted_pairs:
             pairs = targeted_pairs
@@ -719,6 +731,28 @@ def _copy_row_cells(
             (source, target)
             for source, target in pairs
             if source.col_start > rule.skip_leading_columns and target.col_start > rule.skip_leading_columns
+        ]
+
+    # Copy only when column headers are the same on both pages.
+    if source_header and target_header:
+        matched_pairs: list[tuple[CellRef, CellRef]] = []
+        skipped = 0
+        for source, target in pairs:
+            s_label = _header_label_for_col(source_header, source.col_start)
+            t_label = _header_label_for_col(target_header, target.col_start)
+            if s_label and t_label and s_label == t_label:
+                matched_pairs.append((source, target))
+            else:
+                skipped += 1
+        if skipped and rule:
+            print(f"[{rule.key}] skipped {skipped} cells due to header mismatch")
+        pairs = matched_pairs
+
+    if rule and rule.copy_feature_link_only and source_header and target_header:
+        pairs = [
+            (source, target)
+            for source, target in pairs
+            if _header_label_for_col(target_header, target.col_start) == "feature link"
         ]
 
     changed = any(source.inner_html != target.inner_html for source, target in pairs)
@@ -765,16 +799,13 @@ def _copy_labeled_rows_by_occurrence(
 ) -> tuple[str, bool]:
     replacements: list[tuple[CellRef, CellRef]] = []
     changed_any = False
-    source_header = None
-    target_header = None
-    if rule and source_storage_html and target_storage_html:
-        sample_pairs = next(iter(aligned_rows.values()), [])
-        if sample_pairs:
-            source_header = _find_header_row(source_storage_html, sample_pairs[0][0].table_index, sample_pairs[0][0].row_index)
-            target_header = _find_header_row(target_storage_html, sample_pairs[0][1].table_index, sample_pairs[0][1].row_index)
-
     for label, pairs in aligned_rows.items():
         for source_row, target_row in pairs:
+            source_header = None
+            target_header = None
+            if source_storage_html and target_storage_html:
+                source_header = _find_header_row(source_storage_html, source_row.table_index, source_row.row_index)
+                target_header = _find_header_row(target_storage_html, target_row.table_index, target_row.row_index)
             if source_storage_html and target_storage_html:
                 row_pairs = _column_pairs_by_header(source_storage_html, target_storage_html, source_row, target_row)
             else:
@@ -789,6 +820,20 @@ def _copy_labeled_rows_by_occurrence(
                         for source_cell, target_cell in row_pairs
                         if source_cell.col_start > rule.skip_leading_columns and target_cell.col_start > rule.skip_leading_columns
                     ]
+            if source_header and target_header:
+                row_pairs = [
+                    (source_cell, target_cell)
+                    for source_cell, target_cell in row_pairs
+                    if _header_label_for_col(source_header, source_cell.col_start)
+                    and _header_label_for_col(source_header, source_cell.col_start)
+                    == _header_label_for_col(target_header, target_cell.col_start)
+                ]
+            if rule and rule.copy_feature_link_only and source_header and target_header:
+                row_pairs = [
+                    (source_cell, target_cell)
+                    for source_cell, target_cell in row_pairs
+                    if _header_label_for_col(target_header, target_cell.col_start) == "feature link"
+                ]
             for source_cell, target_cell in row_pairs:
                 replacements.append((source_cell, target_cell))
                 changed_any = changed_any or source_cell.inner_html != target_cell.inner_html
@@ -860,8 +905,44 @@ def _annotate_error(message: str) -> tuple[str, str]:
     )
 
 
+def _platform_from_rule_key(rule_key: str) -> str:
+    key = (rule_key or "").lower()
+    if key.startswith("idcevo"):
+        return "IDCEVO"
+    if key.startswith("idc"):
+        return "IDC"
+    if key.startswith("mgu"):
+        return "MGU"
+    return "UNKNOWN"
+
+
+def _classify_error_reason(message: str) -> str:
+    text = (message or "").lower()
+    if "no weekly pages found" in text or "no new weekly page" in text:
+        return "没有扫描到新子页面"
+    if "expected exactly one matching row, found 0" in text or "row count mismatch" in text:
+        return "表格跟上一周不同"
+    if "http 403" in text and "/rest/api/content/" in text:
+        return "无法填写"
+    if "http 4" in text or "http 5" in text:
+        return "无法填写"
+    return "无法填写"
+
+
+def _is_alert_send_day(now: dt.datetime) -> bool:
+    # Monday=0, Wednesday=2
+    return now.weekday() in {0, 2}
+
+
 def _send_error_alert(errors: list[tuple[str, str]], *, apply: bool) -> None:
     if not errors:
+        return
+
+    now_local = dt.datetime.now()
+    if not _is_alert_send_day(now_local):
+        print(
+            f"[alert] skipped: today is {now_local.strftime('%A')}, only send on Monday/Wednesday"
+        )
         return
 
     alert_to = os.environ.get("WEEKLY_COPIER_ALERT_TO", DEFAULT_ALERT_TO).strip()
@@ -876,22 +957,36 @@ def _send_error_alert(errors: list[tuple[str, str]], *, apply: bool) -> None:
     alert_from = os.environ.get("WEEKLY_COPIER_ALERT_FROM", f"weekly-copier@{socket.gethostname()}").strip()
 
     mode = "apply" if apply else "dry-run"
-    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
+    now = now_local.strftime("%Y-%m-%d %H:%M:%S")
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for key, message in errors:
+        platform = _platform_from_rule_key(key)
+        reason = _classify_error_reason(message)
+        grouped.setdefault((platform, reason), []).append(key)
+
     lines = [
-        f"Confluence weekly copier encountered {len(errors)} rule error(s).",
+        "Confluence Weekly Copier 异常通知",
         f"Time: {now}",
         f"Host: {socket.gethostname()}",
         f"Mode: {mode}",
         "",
-        "Errors:",
+        "1. 异常平台：IDCEVO / IDC / MGU",
+        "2. 异常原因：表格跟上一周不同；无法填写；没有扫描到新子页面",
+        "",
+        "本次异常汇总：",
     ]
-    for key, message in errors:
-        lines.append(f"- [{key}] {message}")
-        cause, action = _annotate_error(message)
-        lines.append(f"  Cause: {cause}")
-        lines.append(f"  Suggested action: {action}")
+
+    for (platform, reason), keys in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        rule_list = ", ".join(sorted(set(keys)))
+        lines.append(f"- 异常平台：{platform}")
+        lines.append(f"  异常原因：{reason}")
+        lines.append(f"  影响规则：{rule_list}")
+
+    lines.append("")
+    lines.append("说明：邮件仅在周一、周三发送。")
+
     body = "\n".join(lines)
-    subject = f"[Weekly Copier] {len(errors)} error(s) in {mode}"
+    subject = f"[Weekly Copier] 异常汇总 {len(errors)} 项 ({mode})"
 
     if smtp_host:
         msg = EmailMessage()
@@ -981,6 +1076,17 @@ def _process_rule(
         target_page = _fetch_page(session, target_page_info.page_id)
         source_html = _storage_html(source_page)
         target_html = _storage_html(target_page)
+        if not rule.copy_enabled:
+            source_row = _find_target_row(source_html, rule)
+            target_row = _find_target_row(target_html, rule)
+            print(
+                f"[{rule.key}] {source_page_info.title} table {source_row.table_index} row {source_row.row_index} "
+                f"-> {target_page_info.title} table {target_row.table_index} row {target_row.row_index}: match only, no update"
+            )
+            if apply:
+                _mark_processed(state, rule, target_page_info)
+                changed_state = True
+            continue
         if rule.second_cell_values:
             if rule.copy_all_by_occurrence:
                 all_source_rows = _find_all_rows_by_second_cell(source_html, rule)
